@@ -139,8 +139,26 @@ const parseConfig = () => {
     return rawConfig.includes("@@") ? null : JSON.parse(rawConfig);
 };
 
+const resolveArchConfig = (config) => {
+    if (config && config.LoadStartHookOffset) return config;
+    const table = config && (config.Arch || config.arch);
+    if (!table) return null;
+    const candidates = [Process.arch];
+    if (Process.arch === "x86_64" || Process.arch === "amd64") {
+        candidates.push("x64");
+    }
+    for (const key of candidates) {
+        const picked = table[key];
+        if (picked && picked.LoadStartHookOffset) {
+            return Object.assign({}, picked, { Version: config.Version });
+        }
+    }
+    return null;
+};
+
 const main = () => {
-    const config = parseConfig();
+    const rawConfig = parseConfig();
+    const config = rawConfig && resolveArchConfig(rawConfig);
     if (!config) {
         console.error("[frida] WMPF config is missing");
         return;
