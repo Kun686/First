@@ -167,7 +167,11 @@ class DebugEngine:
             raise
 
     async def send_cdp_command(self, method, params=None, timeout=5.0):
-        """Send an arbitrary CDP command and return the response."""
+        """Send an arbitrary CDP command and return the response.
+
+        The transport is shared by miniapp pages and WeChat embedded browser
+        pages. Once either page type connects, CDP target commands are valid.
+        """
         if not self.miniapp_clients:
             raise RuntimeError("No miniapp client connected")
         cmd_id = self._next_cmd_id()

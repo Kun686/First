@@ -25,6 +25,7 @@ cannot detect WMPF version from path
 
 - Frida 注入微信 WMPF。
 - 使用 Chrome DevTools 调试小程序页面。
+- 调试微信内置浏览器和小程序 `webview` 页面。
 - 调试云函数和 `wx.*` API。
 - 枚举和跳转小程序路由。
 - 解包 `wxapkg` 并扫描敏感信息。
@@ -50,6 +51,16 @@ python gui.py
 ```text
 devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62000
 ```
+
+微信内置网页的使用步骤是：
+
+1. 先启动 First 调试服务。
+2. 在微信里打开需要分析的网页链接。
+3. 在 First 的“页面目标”中点击“刷新目标”。网页会显示为 `page` 或 `webview`。
+4. 点击“自动附加网页”，或者选中目标后点击“附加到选中目标”。
+5. 点击“打开 DevTools”，在 Chrome 或 Edge 中查看网页的 Console、Network 和 Sources。
+
+网页目标的列表来自微信当前调试会话。若列表为空，先让微信内网页完成加载，再刷新目标。关闭微信网页或调试服务会断开该目标。
 
 如果只需要后台调试服务，不需要界面，可以运行：
 

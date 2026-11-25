@@ -1,243 +1,158 @@
-const VERBOSE = false;
-const PLATFORM = Process.platform;  // 'darwin' | 'windows'
-const ARCH = Process.arch;          // 'arm64' | 'x64' | 'x86_64' | ...
-
-// ── Module Resolution ──
+const PLATFORM = Process.platform;
 
 const getMainModule = (version) => {
+    if (PLATFORM === "windows") {
+        return version >= 13331
+            ? Process.findModuleByName("flue.dll")
+            : Process.findModuleByName("WeChatAppEx.exe");
+    }
     if (PLATFORM === "darwin") {
         return Process.findModuleByName("WeChatAppEx Framework");
     }
-    // Windows: flue.dll for newer versions
-    if (version >= 13331) {
-        return Process.findModuleByName("flue.dll");
+    return Process.findModuleByName("WeChatAppEx");
+};
+
+const sceneNeedsRewrite = (scene) => [
+    1005, 1007, 1008, 1011, 1012, 1027, 1035, 1037,
+    1053, 1074, 1145, 1168, 1178, 1256, 1260, 1302, 1308,
+].includes(scene);
+
+const patchCDPFilter = (base, config) => {
+    // Newer WMPF builds serialize CDP messages through CastToJson.
+    if (config.CastToJsonHookOffset &&
+        (PLATFORM === "windows" || PLATFORM === "darwin")) {
+        const castToJson = new NativeFunction(
+            base.add(config.CastToJsonHookOffset),
+            "pointer",
+            ["pointer", "pointer"],
+        );
+        const callback = new NativeCallback(function (thiz, jsonOut, cborInput) {
+            castToJson(jsonOut, cborInput);
+            return jsonOut;
+        }, "pointer", ["pointer", "pointer", "pointer"]);
+        Interceptor.replace(base.add(config.CDPFilterHookOffset), callback);
+        return;
     }
-    return Process.findModuleByName("WeChatAppEx.exe");
-};
 
-// ── Scene Values ──
-
-const SCENE_WHITELIST = [
-    1005, 1007, 1008, 1012, 1027, 1035, 1053, 1074,
-    1145, 1168, 1178, 1256, 1260, 1302, 1308,
-];
-
-// ── CDP Filter Patch (shared logic, platform-specific pointer access) ──
-
-const patchCDPFilter = (base, offset) => {
-    // xref: SendToClientFilter / devtools_message_filter_applet_webview.cc
-    Interceptor.attach(base.add(offset), {
-        onEnter(args) {
-            if (PLATFORM === "windows") {
-                this.inputValue = args[0];
-            }
-        },
+    // Fallback used by older WMPF builds.
+    Interceptor.attach(base.add(config.CDPFilterHookOffset), {
         onLeave(retval) {
-            let target;
-            if (PLATFORM === "darwin") {
-                // macOS: retval points directly to the struct
-                if (!retval || retval.isNull()) return;
-                target = retval.add(8);
-            } else {
-                // Windows: dereference args[0] to get the struct pointer
-                const ptr = this.inputValue.readPointer();
-                if (ptr.isNull() || ptr.add(8).isNull()) return;
-                target = ptr.add(8);
-            }
-            VERBOSE && console.log(`[patch] CDP filter v8[2]: ${target.readU32()}`);
-            if (target.readU32() === 6) {
-                target.writeU32(0x0);
-            }
-        },
-    });
-};
-
-// ── Resource Cache Policy Patch (darwin only) ──
-
-const patchResourceCachePolicy = (base, offset) => {
-    // xref: WAPCAdapterAppIndex.js
-    Interceptor.attach(base.add(offset), {
-        onLeave(retval) {
-            VERBOSE && console.log(`[patch] cache policy retval: ${retval.toInt32()} -> 0`);
-            retval.replace(0x0);
-        },
-    });
-};
-
-// ── OnLoadStart: Darwin ──
-
-const darwinPatchLoadStart = (base, offset) => {
-    // xref: AppletIndexContainer::OnLoadStart (first match)
-    // Force debug mode by setting second param to true
-    Interceptor.attach(base.add(offset), {
-        onEnter() {
-            console.log("[hook] AppletIndexContainer::OnLoadStart onEnter");
-            if (ARCH === "arm64") {
-                this.context.x1 = (this.context.x1 & ~0xff) | 0x1;
-            } else {
-                // x64 / x86_64: System V ABI, second param = RSI
-                this.context.rsi = (this.context.rsi & ~0xff) | 0x1;
-            }
-        },
-        onLeave() {},
-    });
-};
-
-const darwinPatchLoadStart2 = (base, offset, structOffset) => {
-    // xref: AppletIndexContainer::OnLoadStart (last function)
-    // Hijack scene value via struct pointer chain
-    Interceptor.attach(base.add(offset), {
-        onEnter(args) {
             try {
-                const v4 = args[0].add(8).readPointer();
-                if (!v4 || v4.isNull()) return;
-                const q1 = v4.add(structOffset).readPointer();
-                if (!q1 || q1.isNull()) return;
-                const q2 = q1.add(16).readPointer();
-                if (!q2 || q2.isNull()) return;
-                const scenePtr = q2.add(488);
-                const scene = scenePtr.readInt();
-                console.log(`[hook] scene: ${scene}`);
-                if (SCENE_WHITELIST.includes(scene)) {
-                    console.log("[hook] hook scene -> 1101");
-                    scenePtr.writeInt(1101);
+                const result = PLATFORM === "windows"
+                    ? retval.readPointer()
+                    : retval;
+                if (result.isNull()) return;
+                if (result.add(8).readU32() === 6) {
+                    result.add(8).writeU32(0);
                 }
-            } catch (e) {
-                console.error(`[hook] onLoadStart2 error: ${e}`);
+            } catch (_) {
+                // The filter is called frequently. A stale result is harmless.
             }
         },
-        onLeave() {},
     });
 };
 
-// ── OnLoadStart: Windows ──
+const configureModernWebSocket = (launchConfig, remoteDebugConfig, offsets) => {
+    const websocketUrl = "ws://localhost:9421";
+    const websocketUrlString = launchConfig.add(offsets.WebSocketURLStringOffset);
+    const marker = websocketUrlString.add(23).readS8();
+    if (marker < 0) {
+        const data = websocketUrlString.readPointer();
+        data.writeUtf8String(websocketUrl);
+        websocketUrlString.add(8).writeU64(websocketUrl.length);
+    } else {
+        websocketUrlString.writeUtf8String(websocketUrl);
+        websocketUrlString.add(23).writeU8(websocketUrl.length);
+    }
+    remoteDebugConfig.add(offsets.RemoteDebugModeOffset).writeInt(1);
+    send("[hook] remote debug enabled, websocket=" + websocketUrl);
+};
 
-const winPatchLoadStart = (base, config) => {
-    // xref: AppletIndexContainer::OnLoadStart
-    // Windows combines debug flag + scene hijack in one hook
+const handleOnLoadStart = (indexContainer, config) => {
+    const offsets = config.MiniAppConfigStructOffsets || config.SceneOffsets;
+    if (!offsets) return;
+
+    let launchConfig;
+    let remoteDebugConfig;
+    let scenePtr;
+
+    if (config.MiniAppConfigStructOffsets) {
+        const launchOffsets = offsets.LaunchConfigOffsets;
+        const remoteOffsets = offsets.RemoteDebugConfigOffsets;
+        launchConfig = indexContainer
+            .add(launchOffsets[0]).readPointer()
+            .add(launchOffsets[1]).readPointer()
+            .add(launchOffsets[2]).readPointer();
+        remoteDebugConfig = launchConfig
+            .add(remoteOffsets[0]).readPointer()
+            .add(remoteOffsets[1]).readPointer();
+        scenePtr = remoteDebugConfig.add(offsets.SceneOffset);
+    } else {
+        launchConfig = indexContainer
+            .add(offsets[0]).readPointer()
+            .add(offsets[1]).readPointer()
+            .add(offsets[2]).readPointer();
+        remoteDebugConfig = launchConfig
+            .add(offsets[3]).readPointer()
+            .add(offsets[4]).readPointer();
+        scenePtr = remoteDebugConfig.add(offsets[5]);
+    }
+
+    const scene = scenePtr.readInt();
+    send("[hook] scene=" + scene);
+    if (sceneNeedsRewrite(scene)) {
+        scenePtr.writeInt(1101);
+        send("[hook] scene rewritten to 1101");
+    }
+
+    // The original implementation only configured miniapp scenes. Applying the
+    // same callback to every WMPF page also exposes WeChat's embedded browser
+    // and webview targets through the existing CDP proxy.
+    if (config.MiniAppConfigStructOffsets) {
+        configureModernWebSocket(launchConfig, remoteDebugConfig, offsets);
+    }
+};
+
+const patchOnLoadStart = (base, config) => {
     Interceptor.attach(base.add(config.LoadStartHookOffset), {
-        onEnter() {
-            // Microsoft x64 ABI: second param = RDX, force debug mode
-            if ((this.context.rdx & 0xff) !== 1) {
-                this.context.rdx = (this.context.rdx & ~0xff) | 0x1;
-            }
-            // Scene hijack via SceneOffsets pointer chain
-            try {
-                const offsets = config.SceneOffsets;
-                const miniappConfigPtr = this.context.rcx
-                    .add(offsets[0])
-                    .readPointer()
-                    .add(offsets[1])
-                    .readPointer();
-                const scenePtr = miniappConfigPtr
-                    .add(offsets[2])
-                    .readPointer()
-                    .add(offsets[3])
-                    .readPointer()
-                    .add(offsets[4])
-                    .readPointer()
-                    .add(offsets[5]);
-                const scene = scenePtr.readInt();
-                send(`[hook] scene: ${scene}`);
-                if (SCENE_WHITELIST.includes(scene)) {
-                    send("[hook] hook scene -> 1101");
-                    scenePtr.writeInt(1101);
+        onEnter(args) {
+            // Windows uses RDX for the debug flag. macOS uses the second ABI arg.
+            if (PLATFORM === "windows") {
+                if ((this.context.rdx & 0xff) !== 1) {
+                    this.context.rdx = (this.context.rdx & ~0xff) | 1;
                 }
+            } else if (this.context.rsi) {
+                this.context.rsi = (this.context.rsi & ~0xff) | 1;
+            }
+
+            try {
+                handleOnLoadStart(args[0], config);
             } catch (e) {
-                send(`[hook] scene hook error: ${e}`);
+                send("[hook] page debug setup skipped: " + e);
             }
         },
-        onLeave() {},
     });
 };
-
-// ── Config Parsing ──
 
 const parseConfig = () => {
     const rawConfig = `@@CONFIG@@`;
-    if (rawConfig.includes("@@")) {
-        // Fallback test config
-        if (PLATFORM === "darwin") {
-            return {
-                Version: 17078,
-                Arch: {
-                    arm64: {
-                        LoadStartHookOffset: "0x4F0620C",
-                        LoadStartHookOffset2: "0x81CEC08",
-                        CDPFilterHookOffset: "0x81BFC04",
-                        ResourceCachePolicyHookOffset: "0x4F699E8",
-                        StructOffset: 1376,
-                    },
-                },
-            };
-        }
-        return {
-            Version: 18955,
-            LoadStartHookOffset: "0x25B52C0",
-            CDPFilterHookOffset: "0x30248B0",
-            SceneOffsets: [56, 1408, 8, 1344, 16, 488],
-        };
-    }
-    return JSON.parse(rawConfig);
+    return rawConfig.includes("@@") ? null : JSON.parse(rawConfig);
 };
-
-const resolveArchConfig = (config) => {
-    // Windows configs have offsets at top level — return directly
-    if (config && config.LoadStartHookOffset) {
-        return config;
-    }
-    // Mac configs nest under Arch.{arm64|x64}
-    const table = config?.Arch || config?.arch;
-    if (!table) return null;
-
-    const candidates = [ARCH];
-    if (ARCH === "x86_64") candidates.push("x64");
-    if (ARCH === "amd64") candidates.push("x64");
-
-    for (const key of candidates) {
-        const picked = table[key];
-        if (picked && picked.LoadStartHookOffset) {
-            return { ...picked, Version: config.Version, __arch: key };
-        }
-    }
-    return null;
-};
-
-// ── Main ──
 
 const main = () => {
-    const rawConfig = parseConfig();
-    const config = resolveArchConfig(rawConfig);
-
+    const config = parseConfig();
     if (!config) {
-        console.error(`[frida] no config for platform=${PLATFORM} arch=${ARCH}`);
+        console.error("[frida] WMPF config is missing");
         return;
     }
-
-    const mainModule = getMainModule(config.Version);
-    if (!mainModule) {
-        const expected = PLATFORM === "darwin" ? "WeChatAppEx Framework" : "flue.dll / WeChatAppEx.exe";
-        console.error(`[frida] module not found: ${expected}`);
+    const module = getMainModule(config.Version);
+    if (!module) {
+        console.error("[frida] WMPF module not found for " + config.Version);
         return;
     }
-
-    console.log(`[frida] version=${config.Version} platform=${PLATFORM} arch=${config.__arch || ARCH}`);
-    console.log(`[frida] module base: ${mainModule.base}`);
-
-    const base = mainModule.base;
-
-    // CDP filter patch — both platforms
-    patchCDPFilter(base, config.CDPFilterHookOffset);
-
-    if (PLATFORM === "darwin") {
-        darwinPatchLoadStart(base, config.LoadStartHookOffset);
-        darwinPatchLoadStart2(base, config.LoadStartHookOffset2, config.StructOffset);
-        if (config.ResourceCachePolicyHookOffset) {
-            patchResourceCachePolicy(base, config.ResourceCachePolicyHookOffset);
-        }
-    } else {
-        winPatchLoadStart(base, config);
-    }
+    patchCDPFilter(module.base, config);
+    patchOnLoadStart(module.base, config);
+    send("[hook] WMPF " + config.Version + " ready for miniapp and embedded web pages");
 };
 
 main();

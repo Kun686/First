@@ -977,6 +977,9 @@ class App(QMainWindow):
         self._devtools_copy_hint.setProperty("class", "muted")
         self._devtools_copy_hint.setFont(_qfn(-1))
         dt_row.addWidget(self._devtools_copy_hint)
+        self._btn_open_devtools = _make_btn("打开 DevTools", self._open_devtools)
+        self._btn_open_devtools.setEnabled(False)
+        dt_row.addWidget(self._btn_open_devtools)
         dt_row.addStretch()
         lay.addLayout(dt_row)
 
@@ -1329,13 +1332,16 @@ class App(QMainWindow):
         lay.setSpacing(10)
 
         tip_row = QHBoxLayout()
-        tip = QLabel("列出当前调试会话可见的微信内置浏览器 / 小程序 / webview 服务")
+        tip = QLabel("启动服务后，在微信内打开网页，再刷新目标或自动附加网页")
         tip.setProperty("class", "muted")
         tip_row.addWidget(tip)
         tip_row.addStretch()
         self._btn_tgt_refresh = _make_btn("刷新目标", self._do_targets_refresh)
         self._btn_tgt_refresh.setEnabled(False)
         tip_row.addWidget(self._btn_tgt_refresh)
+        self._btn_tgt_auto = _make_btn("自动附加网页", self._do_targets_auto_attach)
+        self._btn_tgt_auto.setEnabled(False)
+        tip_row.addWidget(self._btn_tgt_auto)
         self._btn_tgt_attach = _make_btn("附加到选中目标", self._do_targets_attach)
         self._btn_tgt_attach.setEnabled(False)
         tip_row.addWidget(self._btn_tgt_attach)
@@ -1378,6 +1384,7 @@ class App(QMainWindow):
         if not hasattr(self, "_btn_tgt_refresh"):
             return
         self._btn_tgt_refresh.setEnabled(on)
+        self._btn_tgt_auto.setEnabled(on)
         has_sel = bool(on and self._targets_tree.selectedItems())
         self._btn_tgt_attach.setEnabled(has_sel)
         self._btn_tgt_copy.setEnabled(has_sel)
@@ -1400,6 +1407,14 @@ class App(QMainWindow):
         self._targets_status_lbl.setText("状态: 正在刷新...")
         asyncio.run_coroutine_threadsafe(self._atargets_refresh(), self._loop)
 
+    def _do_targets_auto_attach(self):
+        if not self._engine or not self._loop or not self._loop.is_running():
+            self._log_add("error", "[页面目标] 请先启动调试服务")
+            return
+        self._btn_tgt_auto.setEnabled(False)
+        self._targets_status_lbl.setText("状态: 正在查找微信网页目标...")
+        asyncio.run_coroutine_threadsafe(self._atargets_auto_attach(), self._loop)
+
     async def _atargets_refresh(self):
         try:
             resp = await self._engine.send_cdp_command("Target.getTargets", timeout=8.0)
@@ -1407,6 +1422,28 @@ class App(QMainWindow):
             self._tgt_q.put(("targets", infos))
         except Exception as e:
             self._tgt_q.put(("error", f"刷新失败: {e}"))
+
+    async def _atargets_auto_attach(self):
+        try:
+            resp = await self._engine.send_cdp_command("Target.getTargets", timeout=8.0)
+            infos = resp.get("result", {}).get("targetInfos", [])
+            self._tgt_q.put(("targets", infos))
+            candidates = [
+                target for target in infos
+                if target.get("type") in {"page", "webview"}
+                and str(target.get("url", "")).lower().startswith(("http://", "https://"))
+            ]
+            if not candidates:
+                self._tgt_q.put(("error", "没有发现微信内置网页。请先在微信中打开链接，再点一次自动附加网页"))
+                return
+            target = candidates[0]
+            target_id = target.get("targetId", "")
+            attach = await self._engine.send_cdp_command(
+                "Target.attachToTarget", {"targetId": target_id}, timeout=8.0)
+            self._tgt_q.put(("attached", target_id, attach))
+            self._tgt_q.put(("open_devtools",))
+        except Exception as e:
+            self._tgt_q.put(("error", f"自动附加失败: {e}"))
 
     def _do_targets_attach(self):
         target = self._selected_target()
@@ -1467,6 +1504,8 @@ class App(QMainWindow):
             self._targets_status_lbl.setStyleSheet(f"color: {c['success']};")
             self._log_add("info", f"[页面目标] 已附加到目标: {target_id}{suffix}")
             self._targets_btns(bool(self._miniapp_connected))
+        elif kind == "open_devtools":
+            self._open_devtools()
         elif kind == "error":
             msg = item[1]
             self._targets_status_lbl.setText(f"状态: {msg}")
@@ -3344,6 +3383,16 @@ class App(QMainWindow):
             ))
             self._log_add("info", "[gui] DevTools 链接已复制到剪贴板")
 
+    def _open_devtools(self):
+        url = self._devtools_lbl.text().strip()
+        if not url:
+            self._log_add("error", "[gui] 请先启动调试服务")
+            return
+        if QDesktopServices.openUrl(QUrl(url)):
+            self._log_add("info", f"[gui] 已呼出 DevTools: {url}")
+        else:
+            self._log_add("error", "[gui] 无法呼出 DevTools，请复制链接到 Chrome 或 Edge")
+
     def _do_clear(self):
         self._logbox.clear()
 
@@ -3405,6 +3454,7 @@ class App(QMainWindow):
         self._btn_fetch.setEnabled(True)
         url = f"devtools://devtools/bundled/inspector.html?ws=127.0.0.1:{cp}"
         self._devtools_lbl.setText(url)
+        self._btn_open_devtools.setEnabled(True)
         c = _TH[self._tn]
         self._devtools_copy_hint.setText("点击复制")
         self._devtools_copy_hint.setStyleSheet(f"color: {c['text3']};")
@@ -3421,6 +3471,7 @@ class App(QMainWindow):
         self._running = False
         self._btn_start.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_open_devtools.setEnabled(False)
         self._btn_fetch.setEnabled(False)
         self._nav_btns(False)
         self._targets_btns(False)
@@ -3460,6 +3511,7 @@ class App(QMainWindow):
         self._targets_status_lbl.setText("状态: 未连接小程序")
         self._devtools_lbl.setText("")
         self._devtools_copy_hint.setText("")
+        self._btn_open_devtools.setEnabled(False)
         # 引擎停止，清除侧栏和运行状态卡片的小程序信息
         c = _TH[self._tn]
         self._sb_app_name.setText("未连接")
@@ -4446,6 +4498,8 @@ class App(QMainWindow):
             self._global_inject_gen += 1
             _gi_gen = self._global_inject_gen
             QTimer.singleShot(1500, lambda: self._do_global_inject(_gi_gen))
+        if is_connected and not self._miniapp_connected:
+            QTimer.singleShot(1200, self._do_targets_refresh)
         # 连接时延迟启用，等连接稳定（防止重启时反复抖动）
         self._vc_stable_gen += 1
         gen_stable = self._vc_stable_gen
