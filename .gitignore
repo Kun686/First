@@ -1,0 +1,9 @@
+.venv/
+.deps_installed
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec
+gui_config.json
+.launch_choice

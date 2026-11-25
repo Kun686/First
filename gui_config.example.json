@@ -1,0 +1,16 @@
+{
+  "theme": "dark",
+  "cdp_port": 62000,
+  "debug_main": false,
+  "debug_frida": false,
+  "auto_detect": true,
+  "extract_packages_dir": "",
+  "extract_custom_patterns": {},
+  "auto_decompile": false,
+  "auto_scan": false,
+  "global_hook_scripts": [],
+  "font_ui": "Microsoft YaHei UI",
+  "font_ui_size": 12,
+  "font_mono": "Consolas",
+  "font_mono_size": 15
+}
