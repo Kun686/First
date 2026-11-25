@@ -31,6 +31,12 @@ cannot detect WMPF version from path
 - 解包 `wxapkg` 并扫描敏感信息。
 - 加载自定义用户脚本。
 
+## 当前发行版
+
+我把当前使用的 First 1.1.4 `gui_web` 界面作为发行版基线，保留原有的小程序、Hook、云函数、提取和 MCP 功能。网页调试入口使用 1.1.4 已有的 `page_debugger`、`target_bridge` 和 `browser_cdp` 模块。
+
+下载 [v0.3.0 最新 UI 网页调试版](https://github.com/Kun686/First/releases/tag/v0.3.0)。压缩包内的启动脚本会先写入当前 WMPF Hook 和偏移配置，再启动 1.1.4 界面。
+
 ## 运行源码
 
 环境要求为 Python 3.10 或更高版本。Windows 下可以运行：
@@ -46,7 +52,7 @@ uv sync
 python gui.py
 ```
 
-打开微信小程序后，在界面中点击启动，再用 Chrome 或 Edge 打开：
+打开微信小程序后，在最新 UI 中点击启动，再用 Chrome 或 Edge 打开：
 
 ```text
 devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62000
@@ -56,11 +62,11 @@ devtools://devtools/bundled/inspector.html?ws=127.0.0.1:62000
 
 1. 先启动 First 调试服务。
 2. 在微信里打开需要分析的网页链接。
-3. 在 First 的“页面目标”中点击“刷新目标”。网页会显示为 `page` 或 `webview`。
-4. 点击“自动附加网页”，或者选中目标后点击“附加到选中目标”。
-5. 点击“打开 DevTools”，在 Chrome 或 Edge 中查看网页的 Console、Network 和 Sources。
+3. 在最新 UI 的网页调试入口中连接页面目标。
+4. 选择微信内置网页目标并建立独立页面调试会话。
+5. 点击 F12 或“打开 DevTools”，在 Chrome 或 Edge 中查看网页的 Console、Network 和 Sources。
 
-网页目标的列表来自微信当前调试会话。若列表为空，先让微信内网页完成加载，再刷新目标。关闭微信网页或调试服务会断开该目标。
+网页目标来自微信当前调试会话。若列表为空，先让微信内网页完成加载，再重新连接目标。关闭微信网页或调试服务会断开该目标。
 
 如果只需要后台调试服务，不需要界面，可以运行：
 
